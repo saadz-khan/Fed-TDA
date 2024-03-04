@@ -28,13 +28,13 @@ def get_clients_distribution(datasets, label_name, label_num):
     return c
 
 
-def fed_gc_gen_from_path(path, clients_num, label_column, label_num, discrete_columns, privacy_param, out_path, num_row=None):
+def fed_gc_gen_from_path(path, clients_num, label_column, label_num, discrete_columns, privacy_param, out_path, num_row=None, client_id=None):
 
     train_datasets = read_train_datasets(path, clients_num, label_column)
     distribution = get_clients_distribution(train_datasets, label_column, label_num)
 
     fed_tda = FedTabularDataSyn()
-    fed_tda.fit(train_datasets, discrete_columns=discrete_columns)
+    fed_tda.fit(train_datasets, discrete_columns=discrete_columns, client_id=client_id)
 
 
     sample_class = []
@@ -49,7 +49,7 @@ def fed_gc_gen_from_path(path, clients_num, label_column, label_num, discrete_co
     if num_row is None:
         num_row = 2*sum([len(data) for data in train_datasets])
 
-    sample_data = fed_tda.sample(num_row)
+    sample_data = fed_tda.sample(num_row, client_id)
     sample_data.to_csv(out_path, index=False)
     
     
@@ -64,4 +64,5 @@ for b in ["b=0.05"]:
                              discrete_columns,
                              None,
                              "./data/clinical/syn/clinical_syn_{}.csv".format(i),
-                             1000)
+                             1000,
+                             i)

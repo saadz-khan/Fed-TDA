@@ -17,6 +17,7 @@ FIXED_RNG_SEED = 73251
 TMP_FILE_NAME = '.sample.csv.temp'
 COND_IDX = str(uuid.uuid4())
 EPSILON = np.finfo(np.float32).eps
+pd.options.mode.chained_assignment = None
 
 class FedTabularDataSyn:
 
@@ -71,7 +72,11 @@ class FedTabularDataSyn:
         self._default_distribution = "default"
         self.privacy = None
 
-    def fit(self, data_list, discrete_columns):
+    def mix_parameters(global_param, client_param, alpha):
+        """Mix global and client-specific parameters"""
+        return alpha * global_param + (1 - alpha) * client_param
+
+    def fit(self, data_list, discrete_columns, client_id=None):
         """
 
         :param data_list:
@@ -114,7 +119,7 @@ class FedTabularDataSyn:
 
         with warnings.catch_warnings():
             warnings.filterwarnings('ignore', module='scipy')
-            self._model.fit(transformed_list)
+            self._model.fit(transformed_list, client_id=client_id)
 
     def validate_random_state(random_state):
         """Validate random state argument.
@@ -166,7 +171,7 @@ class FedTabularDataSyn:
                                  f'Use a column name that was present in the original data.')
 
     def sample(self, num_rows, randomize_samples=True, batch_size=None, output_file_path='.sample.csv.temp',
-               conditions=None):
+               conditions=None, client_id=None):
         if conditions is not None:
             raise TypeError('This method does not support the conditions parameter. '
                             'Please create `sdv.sampling.Condition` objects and pass them '
@@ -185,13 +190,14 @@ class FedTabularDataSyn:
 
         sampled = []
         try:
-            def _sample_function(progress_bar=None):
+            def _sample_function(progress_bar=None, client_id=None):
                 for step in range(math.ceil(num_rows / batch_size)):
                     sampled_rows = self._sample_batch(
                         batch_size,
                         batch_size_per_try=batch_size,
                         progress_bar=progress_bar,
                         output_file_path=output_file_path,
+                        client_id=client_id,
                     )
                     sampled.append(sampled_rows)
 
@@ -351,7 +357,7 @@ class FedTabularDataSyn:
 
     def _sample_batch(self, num_rows=None, max_tries=100, batch_size_per_try=None,
                       conditions=None, transformed_conditions=None, float_rtol=0.01,
-                      progress_bar=None, output_file_path=None):
+                      progress_bar=None, output_file_path=None, client_id=None):
 
         if not batch_size_per_try:
             batch_size_per_try = num_rows * 10
@@ -368,7 +374,7 @@ class FedTabularDataSyn:
 
             prev_num_valid = num_valid
             sampled, num_valid = self._sample_rows(
-                batch_size_per_try, conditions, transformed_conditions, float_rtol, sampled,
+                batch_size_per_try, conditions, transformed_conditions, float_rtol, sampled, client_id=client_id
             )
 
             # num_increase = min(num_valid - prev_num_valid, remaining)
@@ -394,11 +400,11 @@ class FedTabularDataSyn:
         return sampled.head(min(len(sampled), num_rows))
 
     def _sample_rows(self, num_rows, conditions=None, transformed_conditions=None,
-                     float_rtol=0.1, previous_rows=None):
+                     float_rtol=0.1, previous_rows=None, client_id=None):
 
         if self._metadata.get_dtypes(ids=False):
             if conditions is None:
-                sampled = self._sample(num_rows)
+                sampled = self._sample(num_rows, client_id=client_id)
             else:
                 try:
                     sampled = self._sample(num_rows, transformed_conditions)
@@ -421,7 +427,7 @@ class FedTabularDataSyn:
             sampled = self._metadata.reverse_transform(sampled)
             return sampled, num_rows
 
-    def _sample(self, num_rows=1, conditions=None):
+    def _sample(self, num_rows=1, conditions=None, client_id=None):
 
         samples = self._get_normal_samples(num_rows, conditions)
 

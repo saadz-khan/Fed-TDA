@@ -43,7 +43,7 @@ class Multivariate:
         :return: (numpy.ndarray)computed covariance matrix.
         """
 
-    def fit(self, x_list):
+    def fit(self, x_list, client_id=None):
         """
 
         :param x_list:
@@ -74,7 +74,7 @@ class Multivariate:
                 # for i in range(clients_num):
                 #     column = x_list[i][column_name]
                 #     columns_list.append(column)
-                univariate.fed_fit(x_list, column_name, distribution)
+                univariate.fed_fit(x_list, column_name, distribution, client_id=client_id)
             except RuntimeError:
                 warning_message = (
                     f'Unable to fit to a {distribution} distribution for column {column_name}. '

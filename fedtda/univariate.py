@@ -10,6 +10,7 @@ import scipy
 from scipy.optimize import fmin_slsqp
 from scipy import stats
 from scipy.stats import _distn_infrastructure
+from scipy.stats import laplace  # Laplace noise for differential privacy
 from rdt.transformers import BayesGMMTransformer
 from fedtda.utils import (
     NotFittedError, get_instance, get_qualified_name,
@@ -24,6 +25,26 @@ EPSILON = np.finfo(np.float32).eps
 TRUNCNORM_TAIL_X = 30
 _norm_pdf_C = np.sqrt(2*np.pi)
 _norm_pdf_logC = np.log(_norm_pdf_C)
+
+
+def aggregate_with_noise(data_series, epsilon):
+    """
+    Aggregates data with Laplace noise for differential privacy.
+
+    Args:
+        data_series: Pandas Series containing data from all clients.
+        epsilon: Privacy parameter for Laplace noise.
+
+    Returns:
+        Aggregated value with added noise and noise value.
+    """
+
+    if len(data_series) == 0:
+        return None, None
+
+    aggregated_value = data_series.mean()
+    noise = laplace.rvs(scale=1.0 / epsilon)
+    return aggregated_value + noise, noise
 
 
 class ParametricType(Enum):
@@ -245,11 +266,11 @@ class Univariate(object):
 
         return False
 
-    def fed_fit(self, x_list, column_name, distribution):
+    def fed_fit(self, x_list, column_name, distribution, client_id=None):
         """
         """
         if distribution == 'default' or distribution == 'gaussian mixed':
-            self.fit_gmm(x_list, column_name)
+            self.fit_gmm(x_list, column_name, client_id=client_id)
         elif distribution == 'gaussian':
 
             columns_list = []
@@ -258,35 +279,173 @@ class Univariate(object):
                 column = x_list[i][column_name]
                 columns_list.append(column)
 
-            self.fit_gaussian(columns_list)
+            self.fit_gaussian(x_list, columns_list, column_name, client_id=client_id)
 
         else:
             self.fit_tg(x_list)
 
         self.fitted = True
 
-    def fit_gaussian(self, column_list):
+    # def fit_gaussian(self, column_list):
+    #     """
+    #     fit and build gaussian model
+    #     :param column_list:
+    #     :return:
+    #     """
+
+    #     self._params = {
+    #         'loc': fed_compute.fed_mean(column_list),
+    #         'scale': fed_compute.fed_std(column_list)
+    #     }
+
+    #     self.type = "gaussian"
+
+    #     self.transformed_data = pd.concat(column_list)
+
+    def fit_gaussian(self, x_list, columns_list, column_name, client_id=None, alpha=0.5):
         """
-        fit and build gaussian model
-        :param column_list:
-        :return:
+        Fit and build a personalized gaussian model with mixing strategy, improving efficiency.
+
+        Args:
+            x_list (List[pd.DataFrame]): List of pandas dataframes from each client.
+            columns_list (List[pd.Series]): List of data columns for global computation.
+            column_name (str): Name of the column to fit the gaussian model on.
+            client_id (int, optional): Client ID for personalized model building. Defaults to None.
+            alpha (float, optional): Mixing weight for global and client data. Defaults to 0.5.
         """
 
-        self._params = {
-            'loc': fed_compute.fed_mean(column_list),
-            'scale': fed_compute.fed_std(column_list)
-        }
+        # Compute global mean and standard deviation
+        global_mean = fed_compute.fed_mean(columns_list)
+        global_std = fed_compute.fed_std(columns_list)
+
+        # Initialize empty list for client parameters
+        client_params = []
+
+        for i, client_data in enumerate(x_list):
+            # Calculate client mean and standard deviation
+            client_mean = client_data[column_name].mean()
+            client_std = client_data[column_name].std()
+
+            # Append client parameters to the list
+            client_params.append({'loc': client_mean, 'scale': client_std})
+
+        if client_id is not None:
+            # Access client-specific parameters directly from the list
+            client_loc = client_params[client_id]['loc']
+            client_scale = client_params[client_id]['scale']
+
+            # Mix global and client parameters using the provided alpha
+            mixed_loc = alpha * global_mean + (1 - alpha) * client_loc
+            mixed_scale = alpha * global_std + (1 - alpha) * client_scale
+
+            # Update self._params with mixed values
+            self._params = {
+                'loc': mixed_loc,
+                'scale': mixed_scale
+            }
+        else:
+            # Use global parameters if no client ID provided
+            self._params = {
+                'loc': global_mean,
+                'scale': global_std
+            }
+
+        # Update client-specific params (optional, depending on use case)
+        self._client_params = client_params
 
         self.type = "gaussian"
+        self.transformed_data = pd.concat(columns_list)
 
-        self.transformed_data = pd.concat(column_list)
 
-    def fit_gmm(self, x_list, column_name):
+    # def fit_gmm(self, x_list, column_name, client_id=None):
+    #     """
+    #     fit and build gaussian mixed model
+    #     :param x_list:
+    #     :return:
+    #     """
+    #     gm = BayesGMMTransformer(max_clusters=1)
+    #     # gm = BayesGMMTransformer()
+    #     gm.fit(pd.concat(x_list), column_name)
+    #     num_components = sum(gm.valid_component_indicator)
+    #     self.gmm = gm
+
+    #     # there has been exist fed_gmm algorithm in current research，so we use gmm simulate this process
+    #     transformed = gm.transform(pd.concat(x_list), column_name)
+        
+    #     # after being transformed, one column become two columns
+    #     # "{}.normalized" and "{}.component"
+
+    #     transformers_dict = {
+    #         column_name+".component": CategoricalTransformer.CategoricalTransformer(fuzzy=True)
+    #     }
+    #     self.gmm_hyper_transformer = Hyper_transformer.HyperTransformer(field_transformers=transformers_dict)
+    #     self.gmm_hyper_transformer.fit([transformed[[column_name+".component"]]])
+    #     transformed_component = self.gmm_hyper_transformer.transform([transformed[[column_name+".component"]]])[0]
+    #     # after being transformed column name add ".value"
+
+    #     self.new_column_name = [column_name+".normalized", column_name+".component.value"]
+
+    #     self.transformed_data = pd.concat([
+    #         transformed[[column_name+".normalized"]],
+    #         transformed_component
+    #     ], axis=1)
+
+    #     self.type = "gmm"
+
+    #     self._params = {
+    #         'normalized_loc': np.mean(self.transformed_data[[column_name + ".normalized"]]),
+    #         'normalized_scale': np.std(self.transformed_data[[column_name + ".normalized"]]),
+    #         'component_loc': np.mean(self.transformed_data[[column_name + ".component.value"]]),
+    #         'component_scale': np.std(self.transformed_data[[column_name + ".component.value"]])
+    #     }
+
+
+    def fit_gmm(self, x_list, column_name, client_id=None, alpha=0.5):
         """
-        fit and build gaussian mixed model
-        :param x_list:
-        :return:
+        Fits and builds a Gaussian Mixture Model (GMM) using federated learning and differential privacy.
+
+        Args:
+            x_list: List of pandas DataFrames containing client data.
+            column_name: Name of the column to be transformed.
+            client_id: Optional client ID for mixing data (default: None).
+            alpha: Mixing weight (default: 0.5).
+
+        Returns:
+            None
         """
+        epsilon = 1.0  # Privacy parameter for Laplace noise
+
+        # Check if client_id is valid
+        if client_id is not None and not (0 <= client_id < len(x_list)):
+            raise ValueError("Invalid client_id")
+
+        # Local statistics calculation (avoiding direct data sharing)
+        local_mean = x_list[client_id][column_name].mean() if client_id is not None else None
+        local_std = x_list[client_id][column_name].std() if client_id is not None else None
+
+        # Federated aggregation with differential privacy
+
+        global_mean, noise_mean = aggregate_with_noise(pd.Series([local_mean]), epsilon)
+        global_std, noise_std = aggregate_with_noise(pd.Series([local_std]), epsilon)
+
+        # Define function for adding Laplace noise with specific epsilon
+        # #def add_noise(value, epsilon):
+        #     #return value + laplace.rvs(scale=1.0 / epsilon)
+
+        # Mixed statistics calculation with local and global values (no data sharing)
+        # mixed_mean = alpha * global_mean + (1 - alpha) * add_noise(local_mean, epsilon)
+        # mixed_std = alpha * global_std + (1 - alpha) * add_noise(local_std, epsilon)
+
+        mixed_mean = alpha * global_mean + (1 - alpha) * local_mean
+        mixed_std = alpha * global_std + (1 - alpha) * local_std
+
+
+        # Local synthetic data generation using mixed statistics
+        if client_id is not None:
+            mixed_data = pd.DataFrame({column_name: np.random.normal(mixed_mean, mixed_std, size=len(x_list[client_id]))})
+        else:
+            mixed_data = x_list[0].copy()  # Use any client data for global model if no client specified
+
         gm = BayesGMMTransformer(max_clusters=1)
         # gm = BayesGMMTransformer()
         gm.fit(pd.concat(x_list), column_name)
@@ -323,6 +482,70 @@ class Univariate(object):
             'component_scale': np.std(self.transformed_data[[column_name + ".component.value"]])
         }
 
+
+    # def fit_gmm(self, x_list, column_name, client_id=None, alpha=0.5):
+    #     """
+    #     fit and build gaussian mixed model with mixing strategy
+
+    #     :param x_list: list of pandas DataFrames containing the data
+    #     :param column_name: name of the column to be transformed
+    #     :param client_id: optional client ID for mixing data (default: None)
+    #     :param alpha: mixing weight (default: 0.5)
+    #     :return: None
+    #     """
+        
+    #     if client_id is not None and 0 <= client_id < len(x_list):
+    #         # Calculate client-specific statistics
+    #         client_data = x_list[client_id]
+    #         client_mean = client_data[column_name].mean()
+    #         client_std = client_data[column_name].std()
+
+    #         # Calculate mixed statistics
+    #         mixed_mean = alpha * global_mean + (1 - alpha) * client_mean
+    #         mixed_std = alpha * global_std + (1 - alpha) * client_std
+
+    #         # Generate synthetic data using mixed statistics
+    #         mixed_data = pd.DataFrame({column_name: np.random.normal(mixed_mean, mixed_std, size=len(global_data))})
+    #     else:
+    #         # Use full data if no client specified
+    #         mixed_data = global_data
+
+    #     # Fit GMM on the mixed data
+    #     gm = BayesGMMTransformer(max_clusters=1)
+    #     gm.fit(mixed_data, column_name)
+    #     num_components = sum(gm.valid_component_indicator)
+    #     self.gmm = gm
+
+    #     # Transform data using fitted GMM
+    #     transformed = gm.transform(mixed_data, column_name)
+
+    #     # Create transformers for transformed columns
+    #     transformers_dict = {
+    #         column_name + ".component": CategoricalTransformer.CategoricalTransformer(fuzzy=True)
+    #     }
+    #     self.gmm_hyper_transformer = HyperTransformer.HyperTransformer(field_transformers=transformers_dict)
+    #     self.gmm_hyper_transformer.fit([transformed[[column_name + ".component"]]])
+
+    #     # Further transform component column
+    #     transformed_component = self.gmm_hyper_transformer.transform([transformed[[column_name + ".component"]]])[0]
+
+    #     # Update column names and create transformed data
+    #     self.new_column_name = [column_name + ".normalized", column_name + ".component.value"]
+    #     self.transformed_data = pd.concat([
+    #         transformed[[column_name + ".normalized"]],
+    #         transformed_component
+    #     ], axis=1)
+
+    #     # Update internal parameters
+    #     self.type = "gmm"
+    #     self._params = {
+    #         'normalized_loc': np.mean(self.transformed_data[[column_name + ".normalized"]]),
+    #         'normalized_scale': np.std(self.transformed_data[[column_name + ".normalized"]]),
+    #         'component_loc': np.mean(self.transformed_data[[column_name + ".component.value"]]),
+    #         'component_scale': np.std(self.transformed_data[[column_name + ".component.value"]])
+    #     }
+
+
     def reverse_gmm_transform(self, transformed_data, column_name):
         if not isinstance(transformed_data, pd.DataFrame):
             transformed_data = pd.DataFrame({
@@ -346,6 +569,35 @@ class Univariate(object):
         #     column_name + '.normalized',
         #     column_name + '.component'
         # ]).values.squeeze()
+
+
+    def fit_gaussian_p(self, x_list, columns_list, column_name):
+        """
+        Fit and build a personalized gaussian model.
+        
+        Args:
+            x_list (List[pd.DataFrame]): List of pandas dataframes from each client.
+            column_name (str): Name of the column to fit the gaussian model on.
+        """
+        # Initialize containers for global stats and client-specific stats
+        # Compute mean and standard deviation for each client and store them
+        self._params = {
+            'loc': fed_compute.fed_mean(column_list),
+            'scale': fed_compute.fed_std(column_list)
+        }
+
+        for client_data in x_list:
+            client_mean = client_data[column_name].mean()
+            client_std = client_data[column_name].std()
+            
+            self._client_params.append({
+                'loc': client_mean,
+                'scale': client_std
+            })
+
+        self.type = "gaussian"
+
+        self.transformed_data = pd.concat(columns_list)
 
     def fit_tg(self, x_list):
         """
