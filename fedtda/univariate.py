@@ -280,6 +280,8 @@ class Univariate(object):
                 columns_list.append(column)
 
             self.fit_gaussian(x_list, columns_list, column_name, client_id=client_id)
+            #self.fit_gaussian(columns_list)
+
 
         else:
             self.fit_tg(x_list)
@@ -302,7 +304,7 @@ class Univariate(object):
 
     #     self.transformed_data = pd.concat(column_list)
 
-    def fit_gaussian(self, x_list, columns_list, column_name, client_id=None, alpha=0.5):
+    def fit_gaussian(self, x_list, columns_list, column_name, client_id=None, alpha=0.7):
         """
         Fit and build a personalized gaussian model with mixing strategy, improving efficiency.
 
@@ -400,7 +402,7 @@ class Univariate(object):
     #     }
 
 
-    def fit_gmm(self, x_list, column_name, client_id=None, alpha=0.5):
+    def fit_gmm(self, x_list, column_name, client_id=None, alpha=0.7):
         """
         Fits and builds a Gaussian Mixture Model (GMM) using federated learning and differential privacy.
 
@@ -413,38 +415,32 @@ class Univariate(object):
         Returns:
             None
         """
-        epsilon = 1.0  # Privacy parameter for Laplace noise
-
-        # Check if client_id is valid
+        # Ensure client_id is within the correct range
         if client_id is not None and not (0 <= client_id < len(x_list)):
             raise ValueError("Invalid client_id")
 
-        # Local statistics calculation (avoiding direct data sharing)
-        local_mean = x_list[client_id][column_name].mean() if client_id is not None else None
-        local_std = x_list[client_id][column_name].std() if client_id is not None else None
+        # Global statistics calculation (aggregated from all clients)
+        global_data = pd.concat([df[column_name] for df in x_list])
+        global_mean = global_data.mean()
+        global_std = global_data.std()
 
-        # Federated aggregation with differential privacy
-
-        global_mean, noise_mean = aggregate_with_noise(pd.Series([local_mean]), epsilon)
-        global_std, noise_std = aggregate_with_noise(pd.Series([local_std]), epsilon)
-
-        # Define function for adding Laplace noise with specific epsilon
-        # #def add_noise(value, epsilon):
-        #     #return value + laplace.rvs(scale=1.0 / epsilon)
-
-        # Mixed statistics calculation with local and global values (no data sharing)
-        # mixed_mean = alpha * global_mean + (1 - alpha) * add_noise(local_mean, epsilon)
-        # mixed_std = alpha * global_std + (1 - alpha) * add_noise(local_std, epsilon)
-
-        mixed_mean = alpha * global_mean + (1 - alpha) * local_mean
-        mixed_std = alpha * global_std + (1 - alpha) * local_std
-
-
-        # Local synthetic data generation using mixed statistics
         if client_id is not None:
-            mixed_data = pd.DataFrame({column_name: np.random.normal(mixed_mean, mixed_std, size=len(x_list[client_id]))})
+            # Local client statistics
+            local_data = x_list[client_id][column_name]
+            local_mean = local_data.mean()
+            local_std = local_data.std()
+
+            # Mixing global and local statistics with alpha parameter
+            mixed_mean = alpha * global_mean + (1 - alpha) * local_mean
+            mixed_std = alpha * global_std + (1 - alpha) * local_std
         else:
-            mixed_data = x_list[0].copy()  # Use any client data for global model if no client specified
+            # Use global statistics if no client_id is provided
+            mixed_mean = global_mean
+            mixed_std = global_std
+
+        # Generating synthetic data using mixed statistics for model training
+        synthetic_data = pd.DataFrame({column_name: np.random.normal(mixed_mean, mixed_std, size=len(global_data))})
+
 
         gm = BayesGMMTransformer(max_clusters=1)
         # gm = BayesGMMTransformer()
